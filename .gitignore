@@ -1,0 +1,225 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# 项目特定文件
+damai_cookies.pkl
+*.pkl
+*_backup.py
+
+# IDE 文件
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 日志文件
+*.log
+
+# 临时文件
+*.tmp
+*.temp
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+# Do not ignore poetry.lock - it should be committed
+# poetry.lock
+
+# pdm
+.pdm.toml
+.pdm-python
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# Claude settings
+.claude/*
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+
+# Selenium
+*.log
+geckodriver.log
+chromedriver.log
+
+# Application specific
+config.json
+credentials.json
+*.cookie
+*.session
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Backup files
+*.bak
+*.backup
+
+# Lock files (except poetry.lock)
+*.lock
+!poetry.lock
+# Local release body temp file - do not commit
+.git_release_body.txt
+
+# GitHub 上传准备 - 忽略体积大或可再生的产物
+# Installer 构建产物
+damai_installer/build/
+damai_installer/dist/
+damai_installer/build/installer/
+damai_installer/build/installer/*.toc
+damai_installer/build/installer/*.html
+damai_installer/build/installer/*.txt
+damai_installer/build/installer/*.zip
+damai_installer/build/installer/*.pyz
+
+# npm 缓存（可再生成）
+installer/packages/npm-cache/
+installer/packages/npm-cache/_cacache/
+installer/packages/npm-cache/_logs/
+
+# 离线安装的大文件（本地保留，不提交仓库）
+damai_installer/installer_files/*.msi
+damai_installer/installer_files/*.zip
+damai_installer/installer_files/npm_packages/*.tgz
+damai_installer/installer_files/wheels/*.whl
+
+# Executable files
+*.exe
