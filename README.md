@@ -241,8 +241,6 @@ damai-ticket-assistant/
 ## 📞 技术支持
 
 如果遇到技术问题，可以：
-
-- 📋 查看项目 [Issues](https://github.com/10000ge10000/damai-ticket-assistant/issues)
 - 📖 阅读详细文档和说明
 - 💬 在仓库中提交新的Issue
 
