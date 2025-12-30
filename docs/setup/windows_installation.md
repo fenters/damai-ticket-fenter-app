@@ -12,7 +12,7 @@
 在项目根目录执行以下命令：
 
 ```powershell
-cd "C:\path\to\damai-ticket-assistant"
+cd "C:\path\to\damai-ticket-fenter-app"
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
