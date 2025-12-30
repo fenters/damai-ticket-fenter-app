@@ -95,7 +95,7 @@ setx ANDROID_HOME "C:\Android"
     - 直接下载 ZIP 并解压，或使用 Git：
 
        ```powershell
-       git clone https://github.com/10000ge10000/damai-ticket-assistant.git
+       git clone https://github.com/fenters/damai-ticket-fenter-app.git
        ```
 
 6. **安装 Python 依赖**
