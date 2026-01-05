@@ -1,0 +1,11 @@
+# Dependencies for Damai Ticket Assistant
+# Install with: pip install -r requirements.txt
+
+# Core
+selenium>=4.18.0
+pydantic>=2.6.0,<3.0.0
+Appium-Python-Client>=3.1.0
+
+# Optional
+requests>=2.31.0
+beautifulsoup4>=4.12.0

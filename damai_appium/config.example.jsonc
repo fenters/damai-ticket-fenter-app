@@ -1,0 +1,22 @@
+{
+  "server_url": "", // Appium服务地址，格式为"http://ip:port"，例如"http://127.0.0.1:4723"
+  "keyword": "", // 演出关键词，用于搜索匹配演出（建议包含城市和演出名称）
+  "users": [], // 观演人列表，留空表示默认选择所有观演人
+  "city": "", // 演出城市，例如"成都"
+  "date": "", // 演出日期，格式为"YYYY-MM-DD HH:MM:SS"，例如"2025-12-28 19:30:00"
+  "session_text": "", // 场次文本，用于匹配场次（例如"2025-12-28 19:30"）
+  "session_index": 0, // 场次索引，数字类型，从0开始（优先级高于session_text）
+  "price": "", // 票价文本，用于匹配票价（例如"380元"，优先级低于price_index）
+  "price_index": 0, // 票价索引，数字类型，从0开始（建议使用）
+  "is_not_ticket": true, // 如果有预约观影人，设置为true表示不选数量，自动选择对应数量
+  "ticket_quantity": null, // 购票数量，留空表示默认1张
+  "if_commit_order": true, // 是否自动提交订单，true表示自动提交，false仅下单不提交
+  "device_caps": { // 设备能力配置（Appium必填）
+    "deviceName": "", // 设备名称（可自定义）
+    "udid": "", // 设备唯一标识（通过`adb devices`获取）
+    "automationName": "" // 自动化引擎，Android建议使用"UiAutomator2"
+  },
+  "wait_timeout": 5.0, // 元素等待超时时间（秒），建议3-10
+  "retry_delay": 2.0, // 操作失败重试延迟（秒），建议1-3
+  "warmup_sec": 180 // 预热等待时间（秒），开售前提前进入详情页的等待时长
+}
