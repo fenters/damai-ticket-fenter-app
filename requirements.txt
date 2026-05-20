@@ -9,3 +9,6 @@ Appium-Python-Client>=3.1.0
 # Optional
 requests>=2.31.0
 beautifulsoup4>=4.12.0
+
+# GUI v2 (CustomTkinter)
+customtkinter>=5.2.2

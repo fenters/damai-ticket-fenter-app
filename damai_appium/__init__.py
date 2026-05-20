@@ -1,7 +1,7 @@
 # -*- coding: UTF-8 -*-
 """Damai mobile app ticket grabbing helpers."""
 
-from .config import AppTicketConfig, ConfigValidationError
+from config import AppTicketConfig, ConfigValidationError
 from .runner import (
 	DamaiAppTicketRunner,
 	FailureReason,

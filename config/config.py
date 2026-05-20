@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields as dataclass_fields
 import json
 from pathlib import Path
-import re
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 from pydantic import (
@@ -19,8 +18,7 @@ from pydantic import (
 )
 
 
-_COMMENT_PATTERN = re.compile(r"//.*?$|/\*.*?\*/", re.DOTALL | re.MULTILINE)
-_DEFAULT_CONFIG_FILENAMES = ("config.jsonc", "config.json")
+_DEFAULT_CONFIG_FILENAMES = ("config.json",)
 
 
 def _normalise_server_url(url: str) -> str:
@@ -611,5 +609,5 @@ def _resolve_config_path(path: Optional[Union[Path, str]]) -> Path:
             return candidate
 
     raise FileNotFoundError(
-        "未找到任何配置文件，请在 damai_appium 目录下提供 config.jsonc 或 config.json"
+        "未找到任何配置文件，请在 config 目录下提供 config.json"
     )

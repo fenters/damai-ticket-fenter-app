@@ -19,6 +19,8 @@ from damai_appium import (
     DamaiAppTicketRunner,
     FailureReason,
     LogLevel,
+    TicketRunnerError,
+    TicketRunnerStopped,
 )
 
 
@@ -215,100 +217,60 @@ def _adb_ready(timeout: float = 5.0) -> bool:
         return False
 
 
-def _wait_until_utc(target_utc: datetime, warmup_sec: int = 0, server_url: Optional[str] = None, config: Optional[AppTicketConfig] = None) -> None:
-    """Wait until target UTC time with optional warmup checks."""
+def _wait_until_utc(target_utc: datetime, warmup_sec: int = 0, server_url: Optional[str] = None, config: Optional[AppTicketConfig] = None) -> Optional[DamaiAppTicketRunner]:
+    """
+    预热：等到达预热时间点后，执行完整预热流程。
+
+    预热内容（由 runner.preheat() 完成）：
+        连接Appium → 选城市 → 搜索演出 → 进入详情页 →
+        点击"立即购买" → 进入选票页 → 预选日期/场次/票价/数量 →
+        记录按钮坐标 → 停留在选票页
+
+    预热完成后返回 runner，后续由 sprint() 负责等到开抢时间并极速点击。
+    时间等待由 sprint() 内部处理，此函数不再做开抢等待。
+
+    Returns:
+        Optional[DamaiAppTicketRunner]: 预热好的 runner（已在选票页就位），失败返回 None。
+    """
     now_utc = datetime.now(timezone.utc)
     remain = (target_utc - now_utc).total_seconds()
 
     if remain <= 0:
-        print(f"[INFO] 开抢时间已过 {abs(remain):.2f}s，立即执行。")
-        return
+        print(f"[INFO] 开抢时间已过 {abs(remain):.2f}s，立即执行（跳过预热）。")
+        return None
 
     warmup = max(0, int(warmup_sec or 0))
     if warmup > 0 and remain > warmup:
         sleep_sec = remain - warmup
-        print(f"[INFO] 距离开抢还有 {remain:.2f}s，先等待 {sleep_sec:.2f}s 后进入预热检查。")
+        print(f"[INFO] 距离开抢还有 {remain:.2f}s，先等待 {sleep_sec:.2f}s 后进入预热。")
         time.sleep(sleep_sec)
+    elif warmup <= 0:
+        print(f"[INFO] 未启用预热(warmup_sec=0)，立即开始预热。")
 
-    # Warmup window (best-effort health checks and navigate to detail page)
-    if warmup > 0:
+    preheated_runner: Optional[DamaiAppTicketRunner] = None
+
+    if config:
+        # 健康检查（非必须，失败不阻塞）
         if server_url:
             ok = _check_appium_status(server_url)
-            status = "OK" if ok else "FAIL"
-            print(f"[INFO] Appium /status 预热检查: {status} ({server_url})")
+            print(f"[INFO] Appium /status: {'OK' if ok else 'FAIL'} ({server_url})")
         adb_ok = _adb_ready()
-        print(f"[INFO] adb 设备状态: {'OK' if adb_ok else 'FAIL'}")
-        
-        # Enter detail page during warmup if config is provided
-        if config:
-            print(f"[INFO] 进入预热阶段，导航到演出详情页面...")
-            try:
-                # Create a runner instance
-                runner = DamaiAppTicketRunner(config=config)
-                # Connect to Appium server
-                driver = runner._create_driver()
-                runner._driver = driver
-                runner._wait = WebDriverWait(driver, config.wait_timeout)
-                
-                # Apply driver settings
-                runner._apply_driver_settings()
-                
-                # Search for the event
-                if config.keyword:
-                    print(f"[INFO] 搜索演出: {config.keyword}")
-                    if not runner._search_event(config.keyword):
-                        print(f"[WARNING] 未能完成演出搜索")
-                    else:
-                        # Tap purchase button to enter detail page
-                        print(f"[INFO] 尝试点击预约/购买按钮进入详情页面")
-                        if runner._tap_purchase_button():
-                            print(f"[INFO] 已成功进入详情页面，等待开抢时间...")
-                        else:
-                            print(f"[WARNING] 未能找到预约/购买入口")
-                
-                # Keep the driver alive until the target time
-                while True:
-                    now_utc = datetime.now(timezone.utc)
-                    remain = (target_utc - now_utc).total_seconds()
-                    if remain <= 0:
-                        break
-                    if remain > 1.0:
-                        # Sleep most of the remaining time, keep 1s for fine-grained loop
-                        time.sleep(remain - 1.0)
-                    else:
-                        # Sub-second busy wait
-                        time.sleep(0.001)
-                        
-                # Cleanup driver
-                driver.quit()
-            except Exception as exc:
-                print(f"[ERROR] 预热期间进入详情页面失败: {exc}")
-                # Continue waiting even if there's an error
-                while True:
-                    now_utc = datetime.now(timezone.utc)
-                    remain = (target_utc - now_utc).total_seconds()
-                    if remain <= 0:
-                        break
-                    if remain > 1.0:
-                        time.sleep(remain - 1.0)
-                    else:
-                        time.sleep(0.001)
-                return
-    else:
-        # Final precise wait to the target moment
-        while True:
-            now_utc = datetime.now(timezone.utc)
-            remain = (target_utc - now_utc).total_seconds()
-            if remain <= 0:
-                break
-            if remain > 1.0:
-                # Sleep most of the remaining time, keep 1s for fine-grained loop
-                time.sleep(remain - 1.0)
-            else:
-                # Sub-second busy wait
-                time.sleep(0.001)
+        print(f"[INFO] adb 设备: {'OK' if adb_ok else 'FAIL'}")
 
-    print("[INFO] 到点，开始执行抢票流程。")
+        print(f"[INFO] 开始完整预热：连接Appium → 搜索演出 → 进入选票页 → 预选 → 记录坐标")
+        try:
+            runner = DamaiAppTicketRunner(config=config)
+            runner.preheat()  # 新 preheat：一路走到选票页并预选
+            preheated_runner = runner
+            print(f"[INFO] 预热成功！已在选票页就位，等待 sprint() 冲刺")
+        except Exception as exc:
+            print(f"[ERROR] 预热失败: {exc}")
+            # 预热失败也继续 — 让 run() 做完整流程兜底
+            preheated_runner = None
+    else:
+        print(f"[INFO] 未提供配置，跳过预热")
+
+    return preheated_runner
 
 
 def main() -> int:
@@ -327,14 +289,19 @@ def main() -> int:
         print(f"[ERROR] 配置加载失败: {exc}")
         return 2
 
-    # If scheduled start is specified, wait until the target time before executing.
+    preheated_runner: Optional[DamaiAppTicketRunner] = None
+    target_epoch: Optional[float] = None
+
+    # If scheduled start is specified, do preheat before the sale
     if getattr(args, "start_at", None):
         try:
             target_utc = _parse_start_at_text(args.start_at)
+            target_epoch = target_utc.timestamp()
             first_server = configs[0].server_url if configs else None
-            # Use the first config for warmup detail page navigation
             first_config = configs[0] if configs else None
-            _wait_until_utc(target_utc, getattr(args, "warmup_sec", 0), first_server, first_config)
+            preheated_runner = _wait_until_utc(
+                target_utc, getattr(args, "warmup_sec", 0), first_server, first_config
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"[WARN] 定时等待发生异常: {exc}，将立即执行。")
 
@@ -347,13 +314,44 @@ def main() -> int:
         session_label = _derive_session_label(config, index)
         logger = _make_session_logger(session_label)
         print(f"[INFO] 开始执行 {session_label}")
-        runner = DamaiAppTicketRunner(config=config, logger=logger)
-        success = runner.run(max(args.retries, 1))
+
+        # Use preheated runner if available and config matches
+        if preheated_runner and preheated_runner.config == config:
+            print("[INFO] 使用预热好的runner（已在选票页就位）")
+            runner = preheated_runner
+            runner._logger = logger
+        else:
+            runner = DamaiAppTicketRunner(config=config, logger=logger)
+
+        # 有预热且有开抢时间 → 使用极速冲刺模式
+        if preheated_runner is not None and target_epoch is not None:
+            print("[INFO] 启动极速冲刺模式（坐标盲点 + CPU自旋等待）")
+            try:
+                success = runner.sprint(target_epoch)
+            except TicketRunnerStopped:
+                success = False
+                print("[WARN] 用户停止了流程")
+            except TicketRunnerError as exc:
+                success = False
+                print(f"[ERROR] 冲刺失败: {exc}")
+            except Exception as exc:  # noqa: BLE001
+                success = False
+                print(f"[ERROR] 冲刺异常: {exc}")
+        else:
+            # 没有开抢时间 → 使用传统 run() 模式（元素查找兜底）
+            print("[INFO] 使用传统抢票模式")
+            success = runner.run(max(args.retries, 1))
+
         report = runner.get_last_report()
         _print_summary(success, report, session_label=session_label)
         if not success:
             overall_success = False
         runs.append({"session": session_label, "success": success, "config": config, "report": report})
+
+        # Cleanup preheated runner after first use
+        if preheated_runner and preheated_runner.config == config:
+            preheated_runner = None
+            target_epoch = None
 
     print(
         f"[SUMMARY] 所有会话执行完成，共 {total} 个，其中 {sum(1 for item in runs if item['success'])} 个成功。"

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-GUI专用的大麦网演出页面分析和抢票模块
-为GUI界面提供页面分析和抢票功能
+大麦网 Web 端抢票模块（Selenium）
+提供页面分析和抢票功能，供 GUI 和 CLI 使用
 """
 
 import time
@@ -126,8 +126,8 @@ class PageAnalyzer:
         return options
 
 
-class GUIConcert:
-    """GUI专用的抢票类"""
+class WebConcert:
+    """Web端抢票类"""
     
     def __init__(self, driver, config, log_callback=None, cookie_callback=None, stop_check=None):
         self.driver = driver
@@ -387,13 +387,13 @@ class GUIConcert:
             
             # 多种可能的购买按钮选择器
             buy_selectors = [
-                ".buy-link",                      # 新增：支持 <div class="buy-link">
+                ".buy-link",
                 ".buybtn",
                 ".buy-btn", 
                 "[data-spm='dbuy']",
                 "button[class*='buy']",
                 ".perform__order__buy",
-                "[data-spm-anchor-id*='project']"  # 新增：支持带anchor-id的元素
+                "[data-spm-anchor-id*='project']"
             ]
             
             # 先尝试CSS选择器
@@ -413,16 +413,15 @@ class GUIConcert:
             text_selectors = [
                 "立即购票",
                 "立即购买", 
-                "立即预订",              # 新增：支持预订按钮
+                "立即预订",
                 "马上购买",
-                "马上预订",              # 新增：支持预订按钮
-                "不，立即购票",          # 支持您之前提供的具体文本
-                "不，立即预订"           # 新增：支持您现在提供的预订文本
+                "马上预订",
+                "不，立即购票",
+                "不，立即预订"
             ]
             
             for text in text_selectors:
                 try:
-                    # 查找包含指定文本的可点击元素
                     elements = self.driver.find_elements(By.XPATH, f"//*[contains(text(), '{text}')]")
                     for element in elements:
                         if element.is_displayed() and element.is_enabled():
@@ -433,14 +432,13 @@ class GUIConcert:
                 except:
                     continue
                     
-            # JavaScript fallback - 最后的备选方案
+            # JavaScript fallback
             try:
                 self.log("🔄 尝试JavaScript方式点击购买按钮...")
                 js_script = """
                 var buyTexts = ['立即购票', '立即购买', '立即预订', '马上购买', '马上预订', '不，立即购票', '不，立即预订'];
                 var buySelectors = ['.buy-link', '.buybtn', '.buy-btn', '[data-spm="dbuy"]', 'button[class*="buy"]', '.perform__order__buy'];
                 
-                // 首先尝试CSS选择器
                 for (var i = 0; i < buySelectors.length; i++) {
                     var elements = document.querySelectorAll(buySelectors[i]);
                     for (var j = 0; j < elements.length; j++) {
@@ -451,7 +449,6 @@ class GUIConcert:
                     }
                 }
                 
-                // 然后尝试文本内容
                 for (var i = 0; i < buyTexts.length; i++) {
                     var elements = document.querySelectorAll('*');
                     for (var j = 0; j < elements.length; j++) {
@@ -486,16 +483,12 @@ class GUIConcert:
         try:
             self.log("📋 处理购买页面...")
             
-            # 等待购买页面加载
             time.sleep(3)
             
-            # 尝试选择观演人（如果需要）
             self._select_viewers()
             
-            # 处理可能的弹窗
             self._handle_popups()
             
-            # 如果配置了自动提交订单
             if self.config.get('if_commit_order', False):
                 self._submit_order()
             else:
@@ -509,16 +502,12 @@ class GUIConcert:
         try:
             self.log("👥 正在选择观演人...")
             
-            # 根据新的页面结构查找观演人选择区域
             viewer_selectors = [
-                # 新的观演人选择器 - 基于您提供的HTML结构
-                "#dmViewerBlock_DmViewerBlock",                          # 主观演人区域
-                ".viewer",                                               # 观演人容器
-                ".viwer-info-name",                                      # 观演人信息区域
-                "[class*='viewer']",                                     # 包含viewer的类名
-                "[id*='dmViewerBlock']",                                 # 包含dmViewerBlock的ID
-                
-                # 传统的观演人选择器
+                "#dmViewerBlock_DmViewerBlock",
+                ".viewer",
+                ".viwer-info-name",
+                "[class*='viewer']",
+                "[id*='dmViewerBlock']",
                 ".buyer-list", 
                 ".viewer-list",
                 "[class*='buyer']",
@@ -527,7 +516,6 @@ class GUIConcert:
             
             found_viewers = False
             
-            # 1. 先尝试找到观演人区域
             for selector in viewer_selectors:
                 try:
                     viewer_elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
@@ -542,19 +530,12 @@ class GUIConcert:
                 self.log("⚠️ 未找到观演人选择区域")
                 return
             
-            # 2. 尝试点击观演人选择（根据新的页面结构）
-            # 查找可点击的观演人元素
             clickable_selectors = [
-                # 基于您提供的结构，查找带有选择图标的区域
-                ".icondanxuan-xuanzhong_",                               # 选择图标
-                "[class*='icondanxuan']",                                # 包含选择相关的图标
-                "i.iconfont",                                            # 图标字体
-                
-                # 可点击的观演人信息区域
-                ".viwer-info-name",                                      # 观演人名称区域
-                ".viewer div[style*='display: flex']",                   # 观演人信息行
-                
-                # 传统的checkbox选择器
+                ".icondanxuan-xuanzhong_",
+                "[class*='icondanxuan']",
+                "i.iconfont",
+                ".viwer-info-name",
+                ".viewer div[style*='display: flex']",
                 "input[type='checkbox']",
                 "label",
                 "[role='checkbox']"
@@ -568,19 +549,15 @@ class GUIConcert:
                     
                     for element in elements:
                         try:
-                            # 检查元素是否可见和可点击
                             if element.is_displayed() and element.is_enabled():
-                                # 滚动到元素位置
                                 self.driver.execute_script("arguments[0].scrollIntoView(true);", element)
                                 time.sleep(0.3)
                                 
-                                # 尝试点击
                                 element.click()
                                 selected_count += 1
                                 self.log(f"✅ 已选择观演人 ({selected_count})")
                                 time.sleep(0.5)
                                 
-                                # 如果只需要选择1位观演人，选择完成后退出
                                 if selected_count >= 1:
                                     self.log("✅ 观演人选择完成 (已选择1位)")
                                     return
@@ -591,13 +568,10 @@ class GUIConcert:
                 except Exception as e:
                     continue
             
-            # 3. 如果上述方法都失败，尝试通过JavaScript选择
             if selected_count == 0:
                 self.log("🔄 尝试通过JavaScript选择观演人...")
                 try:
-                    # 查找并点击观演人相关的元素
                     js_script = """
-                    // 查找观演人相关的可点击元素
                     var viewers = document.querySelectorAll('.viewer, .viwer-info-name, [class*="viewer"], [id*="dmViewerBlock"]');
                     var selected = false;
                     
@@ -609,7 +583,6 @@ class GUIConcert:
                         }
                     }
                     
-                    // 如果还没选择，尝试点击图标
                     if (!selected) {
                         var icons = document.querySelectorAll('i.iconfont, [class*="icon"]');
                         for (var j = 0; j < icons.length && !selected; j++) {
@@ -641,7 +614,6 @@ class GUIConcert:
     def _handle_popups(self):
         """处理各种弹窗"""
         try:
-            # 常见弹窗处理
             popup_selectors = [
                 ".ant-modal-close",
                 ".modal-close",
@@ -667,20 +639,14 @@ class GUIConcert:
         try:
             self.log("📄 正在提交订单...")
             
-            # 查找提交按钮 - 更新选择器以支持新的页面结构
             submit_selectors = [
-                # 新的提交按钮选择器 - 基于您提供的HTML结构
-                "span[style*='line-height: 40px']",                      # 包含立即提交文本的span
-                "span:contains('立即提交')",                              # 包含立即提交文本的span
-                "[style*='line-height: 40px']",                         # 特定样式的元素
-                
-                # 通过文本内容查找
-                "//*[contains(text(), '立即提交')]",                     # XPath方式查找
+                "span[style*='line-height: 40px']",
+                "span:contains('立即提交')",
+                "[style*='line-height: 40px']",
+                "//*[contains(text(), '立即提交')]",
                 "//*[contains(text(), '提交订单')]",
                 "//*[contains(text(), '确认购买')]",
                 "//*[contains(text(), '立即支付')]",
-                
-                # 传统的提交按钮选择器
                 ".submit-btn",
                 ".confirm-btn", 
                 "button[class*='submit']",
@@ -688,19 +654,16 @@ class GUIConcert:
                 "[role='button'][class*='submit']"
             ]
             
-            # 1. 先尝试CSS选择器
             for selector in submit_selectors:
                 try:
-                    if selector.startswith("//"):  # XPath选择器
+                    if selector.startswith("//"):
                         continue
                     
                     submit_elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
                     for element in submit_elements:
                         if element.is_displayed() and element.is_enabled():
-                            # 检查元素文本是否包含提交相关词汇
                             text = element.text.strip()
                             if any(keyword in text for keyword in ['立即提交', '提交订单', '确认购买', '立即支付']):
-                                # 滚动到元素位置
                                 self.driver.execute_script("arguments[0].scrollIntoView(true);", element)
                                 time.sleep(0.5)
                                 
@@ -711,7 +674,6 @@ class GUIConcert:
                 except Exception as e:
                     continue
             
-            # 2. 尝试XPath选择器
             xpath_selectors = [
                 "//*[contains(text(), '立即提交')]",
                 "//*[contains(text(), '提交订单')]",
@@ -724,7 +686,6 @@ class GUIConcert:
                     submit_elements = self.driver.find_elements(By.XPATH, selector)
                     for element in submit_elements:
                         if element.is_displayed() and element.is_enabled():
-                            # 滚动到元素位置
                             self.driver.execute_script("arguments[0].scrollIntoView(true);", element)
                             time.sleep(0.5)
                             
@@ -735,11 +696,9 @@ class GUIConcert:
                 except Exception as e:
                     continue
             
-            # 3. 如果都失败，尝试JavaScript方式查找和点击
             self.log("🔄 尝试通过JavaScript提交订单...")
             try:
                 js_script = """
-                // 查找包含提交相关文本的元素
                 var submitTexts = ['立即提交', '提交订单', '确认购买', '立即支付'];
                 var allElements = document.querySelectorAll('*');
                 var submitted = false;
@@ -753,7 +712,6 @@ class GUIConcert:
                             element.offsetWidth > 0 && 
                             element.offsetHeight > 0) {
                             
-                            // 尝试点击元素或其父元素
                             try {
                                 element.click();
                                 submitted = true;
