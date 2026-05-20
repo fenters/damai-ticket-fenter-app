@@ -1,6 +1,6 @@
 # Web 模式使用说明
 
-![Web 模式界面](../../web_image.png)
+![Web 模式界面](web_image.png)
 
 ## 概述
 

@@ -1,6 +1,6 @@
 # 安卓端抢票方案 (App 模式)
 
-![App 模式界面](../../app_image.png)
+![App 模式界面](app_image.png)
 
 ## 架构
 
