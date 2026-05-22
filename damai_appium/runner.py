@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -142,11 +143,12 @@ class TicketRunReport:
 
 def _default_logger(level: str, message: str, context: Optional[Dict[str, Any]] = None) -> None:
     context = context or {}
+    ts = datetime.now().strftime("%H:%M:%S.%f")[:12]
     extra = " ".join(f"{key}={value}" for key, value in context.items())
     if extra:
-        print(f"[{level.upper()}] {message} | {extra}")
+        print(f"[{ts}] [{level.upper()}] {message} | {extra}")
     else:
-        print(f"[{level.upper()}] {message}")
+        print(f"[{ts}] [{level.upper()}] {message}")
 
 
 @dataclass
@@ -176,152 +178,172 @@ class DamaiAppTicketRunner:
         self._log_entries = []
         self._run_start_time = 0.0
         self.last_report = None
-        # 盲点坐标（预热阶段记录，冲刺阶段优先使用）
-        self._confirm_btn_x: Optional[int] = None
-        self._confirm_btn_y: Optional[int] = None
-        self._submit_btn_x: Optional[int] = None
-        self._submit_btn_y: Optional[int] = None
+        # 底部栏坐标（详情页一次记录，所有页面盲点复用）
+        self._btn_right_x: Optional[int] = None
+        self._btn_y: Optional[int] = None
         # 页面 activity（预热阶段记录，冲刺阶段用于判断页面跳转）
         self._select_activity: Optional[str] = None
         self._order_activity: Optional[str] = None
+        # 预热决定的分支模式（"reserved" / "normal"）
+        self._sprint_mode: str = "normal"
+        # ADB 持久 shell 管道（冲刺阶段加速触摸）
+        self._adb_process: Optional[subprocess.Popen] = None
 
     def preheat(self) -> None:
         """
-        预热操作：一路走到选票页，预选所有选项，记录按钮坐标。
+        预热操作：确定模式（已预约/未预约），记录坐标后返回详情页等待。
 
-        流程：连接Appium → 选城市 → 搜索演出 → 进入详情页 →
-              点击"立即购买" → 进入选票页 → 预选日期/场次/票价/数量 →
-              记录"确定"按钮坐标 → 尝试记录"提交订单"按钮坐标 → 停留在选票页
+        流程：连接Appium → 搜索演出 → 进入详情页 →
+              录购买按钮坐标 → 点击"立即购买" → 进入选票页 →
+              已预约：跳过场次/票价，直接录确定/提交坐标 →
+              未预约：预选场次/票价，再录确定/提交坐标 →
+              返回详情页等待开抢
         """
         self.current_phase = RunnerPhase.INIT
         self.phase_history = [RunnerPhase.INIT]
         self._log_entries = []
-        
+
         self._log(LogLevel.INFO, "===== 预热阶段开始 =====")
-        
-        # 创建driver
+
         self._transition_to(RunnerPhase.CONNECTING)
         self._log(LogLevel.STEP, "连接Appium server")
         self._driver = self._create_driver()
         self._wait = WebDriverWait(self._driver, self.config.wait_timeout)
-        
-        # 应用设置
+
         self._transition_to(RunnerPhase.APPLYING_SETTINGS)
         self._log(LogLevel.STEP, "应用Appium设置")
         self._apply_driver_settings()
-        
-        # 选择城市
+
         if self.config.city:
             self._transition_to(RunnerPhase.SELECTING_CITY)
             self._log(LogLevel.STEP, f"选择城市: {self.config.city}")
             if not self._select_city(self.config.city):
                 self._log(LogLevel.WARNING, f"未找到城市 {self.config.city}")
-        
-        # 搜索目标 → 进入详情页
+
         if self.config.keyword:
             self._transition_to(RunnerPhase.SEARCHING_EVENT)
             self._log(LogLevel.STEP, f"搜索演出: {self.config.keyword}")
             if not self._search_event(self.config.keyword):
                 raise TicketRunnerError("未能完成演出搜索")
-        
+
         self._log(LogLevel.SUCCESS, "已进入演出详情页")
 
-        # --- 处理详情页弹窗（观演人选择等）---
         self._transition_to(RunnerPhase.TAPPING_PURCHASE)
         self._select_theme_dialog()
 
-        # --- 点击"立即购买"进入选票页（循环重试直到成功）---
+        # 在详情页一次性记录所有按钮的盲点坐标
+        self._record_all_button_coords()
+
+        # --- 一条分支：根据预约状态走两条不同的路 ---
+        if self.config.is_reserved:
+            self._sprint_mode = "reserved"
+            self._log(LogLevel.INFO, "已预约模式：不进选票页，直接等待开抢")
+            self._log(LogLevel.SUCCESS, "预热完成，已停在详情页")
+            return
+        else:
+            self._sprint_mode = "normal"
+            self._log(LogLevel.INFO, "未预约模式：进选票页预选场次/票价")
+
+        # 点击购买进入选票页
         self._log(LogLevel.STEP, "点击立即购买，进入选票页")
         if not self._wait_and_tap_purchase_button(timeout_sec=120):
             raise TicketRunnerError("无法进入选票页（预热失败）")
         self._log(LogLevel.SUCCESS, "已进入选票页")
 
-        # 记录选票页的 activity 名称（冲刺阶段用于判断页面跳转）
         try:
             self._select_activity = self._driver.current_activity
             self._log(LogLevel.INFO, f"选票页activity: {self._select_activity}")
         except Exception:
             self._log(LogLevel.WARNING, "无法获取选票页activity")
 
-        # --- 预选：日期 → 场次 → 票价 → 数量 ---
-        if self.config.date:
-            self._transition_to(RunnerPhase.SELECTING_DATE)
-            self._log(LogLevel.STEP, f"预选日期: {self.config.date}")
-            if not self._select_date():
-                self._log(LogLevel.WARNING, "日期预选失败，开抢后可能需要手动选")
-
+        # 预选场次/票价
         if self.config.session_index is not None:
             self._transition_to(RunnerPhase.SELECTING_SESSION)
             self._log(LogLevel.STEP, f"预选场次: index={self.config.session_index}")
             if not self._select_session():
                 self._log(LogLevel.WARNING, "场次预选失败")
-
         if self.config.price_index is not None:
             self._transition_to(RunnerPhase.SELECTING_PRICE)
             self._log(LogLevel.STEP, f"预选票价: index={self.config.price_index}")
             if not self._select_price():
                 self._log(LogLevel.WARNING, "票价预选失败")
 
-        self._transition_to(RunnerPhase.SELECTING_QUANTITY)
-        self._select_quantity()
-
-        # --- 记录"确定"按钮的屏幕坐标 ---
-        self._record_confirm_button()
-
-        # --- 尝试进入订单页记录"提交订单"按钮坐标 ---
-        self._try_record_submit_button()
-
-        self._log(
-            LogLevel.SUCCESS,
-            f"预热完成：已在选票页就位 | "
-            f"确定按钮({self._confirm_btn_x},{self._confirm_btn_y}) | "
-            f"提交按钮({self._submit_btn_x},{self._submit_btn_y})"
-        )
+        # 返回详情页等待开抢
+        self._log(LogLevel.STEP, "返回详情页，等待开抢")
+        driver = self._ensure_driver()
+        driver.press_keycode(4)
+        time.sleep(0.5)
+        self._log(LogLevel.SUCCESS, "已回到详情页")
 
     # ------------------------------------------------------------------
     # Sprint (极速冲刺)
     # ------------------------------------------------------------------
     def sprint(self, target_epoch: float) -> bool:
         """
-        极速冲刺：自旋等到开抢时间 → 盲点"确定" → 盲点"提交" → 完成。
+        极速冲刺：自旋等开抢 → ADB盲点(同一坐标贯穿全程) → 根据预热分支。
 
-        必须在 preheat() 之后调用。已记录的坐标和 activity 用于极速盲点
-        和页面跳转检测。如果盲点方式失败，自动回退到元素查找方式。
+        必须 preheat() 之后调用。
+        - reserved：纯盲点，0 次 find_element
+        - normal：1 次 find_element 选数量 + 盲点
         """
-        # 阶段 0：CPU 自旋等到开抢时间（微秒级精度）
-        self._log(LogLevel.INFO, f"在选票页等待开抢时间 {target_epoch}")
+        self._log(LogLevel.INFO, f"在详情页等待开抢时间 {target_epoch}")
+        self._start_adb_shell()
         self._spin_wait(target_epoch)
         self._log(LogLevel.SUCCESS, "到点！开始极速抢票！")
 
-        # 阶段 1：极速点击"确定"按钮
-        self._transition_to(RunnerPhase.CONFIRMING_PURCHASE)
-        confirm_ok = self._sprint_phase_confirm(timeout_sec=30)
-        if not confirm_ok:
-            self._log(LogLevel.WARNING, "盲点确定失败，回退到元素查找方式")
-            ok, _ = self._confirm_purchase()
-            if not ok:
-                raise TicketRunnerError("确认购买失败（盲点+元素回退均失败）")
+        # ADB 盲点购买按钮（右边缘 - offset，同一坐标贯穿购买→确认→提交）
+        self._log(LogLevel.STEP, "ADB盲点购买")
+        if self._btn_right_x is None or self._btn_y is None:
+            self._log(LogLevel.WARNING, "无底部栏坐标，回退到元素查找")
+            if not self._wait_and_tap_purchase_button(timeout_sec=5):
+                raise TicketRunnerError("无法进入选票页")
 
-        self._log(LogLevel.SUCCESS, "已进入订单页")
+        self._log(LogLevel.SUCCESS, "开始盲点循环")
 
-        # 记录订单页 activity（如果还没记录）
-        if self._order_activity is None:
-            try:
-                self._order_activity = self._driver.current_activity
-                self._log(LogLevel.INFO, f"订单页activity: {self._order_activity}")
-            except Exception:
-                pass
+        if self._sprint_mode == "reserved":
+            return self._do_sprint_reserved()
+        return self._do_sprint_normal()
 
-        # 阶段 2：极速点击"提交订单"按钮
-        self._transition_to(RunnerPhase.SUBMITTING_ORDER)
-        submit_ok = self._sprint_phase_submit(timeout_sec=30)
-        if not submit_ok:
-            self._log(LogLevel.WARNING, "盲点提交失败，回退到元素查找方式")
-            self._submit_order()
-
+    def _do_sprint_reserved(self) -> bool:
+        """已预约：纯盲点循环，0 次 find_element。"""
+        hits = self._blind_tap_loop(timeout_sec=30)
         self._transition_to(RunnerPhase.COMPLETED)
-        self._log(LogLevel.SUCCESS, "抢票成功！已进入付款页面，请手动支付")
+        self._log(LogLevel.SUCCESS, f"抢票完成，盲点 {hits} 次")
         return True
+
+    def _do_sprint_normal(self) -> bool:
+        """未预约：选数量 + 盲点循环。"""
+        self._transition_to(RunnerPhase.SELECTING_QUANTITY)
+        self._select_quantity()
+        hits = self._blind_tap_loop(timeout_sec=30)
+        self._transition_to(RunnerPhase.COMPLETED)
+        self._log(LogLevel.SUCCESS, f"抢票完成，盲点 {hits} 次")
+        return True
+
+    def _blind_tap_loop(self, timeout_sec: float = 30) -> int:
+        """
+        纯盲点循环：无页面检测，同一坐标每秒 100 次一直点。
+        详情页 → 选票页 → 订单页，同一个坐标贯穿所有按钮。
+        """
+        if self._btn_right_x is None or self._btn_y is None:
+            self._log(LogLevel.ERROR, "无底部栏坐标，无法盲点")
+            return 0
+
+        x = self._btn_right_x - self.config.confirm_offset
+        y = self._btn_y
+        deadline = time.time() + timeout_sec
+        hits = 0
+
+        self._log(LogLevel.STEP, f"盲点循环 100次/秒 ({x},{y})")
+
+        while time.time() < deadline:
+            self._ensure_not_stopped()
+            self._adb_tap(x, y)
+            hits += 1
+            time.sleep(0.01)  # 100 taps/sec
+
+        self._log(LogLevel.WARNING, f"盲点超时，共点击 {hits} 次")
+        return hits
 
     def _spin_wait(self, target_epoch: float) -> None:
         """CPU 自旋等待直到目标时间戳（微秒级精度）。"""
@@ -338,207 +360,92 @@ class DamaiAppTicketRunner:
                     pass
                 return
 
+    def _start_adb_shell(self) -> None:
+        """启动持久 ADB shell 管道，用于冲刺阶段高速盲点。"""
+        if self._adb_process is not None:
+            return
+        udid = self.config.device_caps.get("udid", "")
+        cmd = ["adb", "shell"]
+        if udid:
+            cmd = ["adb", "-s", udid, "shell"]
+        try:
+            self._adb_process = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, text=True, bufsize=0,
+            )
+            self._log(LogLevel.INFO, f"ADB shell 已启动 (udid={udid or '默认设备'})")
+        except Exception as e:
+            self._log(LogLevel.WARNING, f"ADB shell 启动失败，回退 Appium 点击: {e}")
+            self._adb_process = None
+
+    def _stop_adb_shell(self) -> None:
+        """关闭 ADB shell 管道。"""
+        proc = self._adb_process
+        if proc is None:
+            return
+        self._adb_process = None
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def _is_adb_alive(self) -> bool:
+        proc = self._adb_process
+        return proc is not None and proc.poll() is None
+
+    def _adb_tap(self, x: int, y: int) -> None:
+        """通过持久 ADB shell 管道发射 tap 命令（无 HTTP 开销）。"""
+        self._log(LogLevel.INFO, f"点击坐标 ({x}, {y})")
+        if not self._is_adb_alive():
+            self._fire_tap(x, y)
+            return
+        try:
+            self._adb_process.stdin.write(f"input tap {x} {y}\n")
+            self._adb_process.stdin.flush()
+        except Exception:
+            self._stop_adb_shell()
+            self._fire_tap(x, y)
+
     def _fire_tap(self, x: int, y: int, duration: int = 5) -> None:
         """
         向屏幕坐标发射一次点击（mobile: clickGesture）。
 
         不调用 find_element，直接注入触摸事件。
         """
+        self._log(LogLevel.INFO, f"点击坐标 ({x}, {y})")
         self._driver.execute_script("mobile: clickGesture", {
             "x": x, "y": y, "duration": duration
         })
 
-    def _sprint_phase_confirm(self, timeout_sec: float = 30) -> bool:
+    def _record_all_button_coords(self) -> None:
         """
-        在选票页极速点击"确定"按钮，直到离开选票页。
+        从详情页底部栏容器一次性计算所有按钮的盲点坐标。
 
-        策略：
-        1. 优先使用预热记录的坐标盲点（最快，不调 find_element）
-        2. 每次点击后即时检查 activity 是否变化
-        3. 无 sleep，让 Appium 通信开销自然节流
-        4. 如果盲点坐标未记录，回退到每 50 次迭代做一次元素定位
+        底部栏在详情页/选票页/订单页位置固定，所有按钮共享同一 Y，
+        X 坐标统一用 右边缘 - confirm_offset。
         """
-        driver = self._ensure_driver()
-        x, y = self._confirm_btn_x, self._confirm_btn_y
-
-        if x is None or y is None:
-            self._log(LogLevel.WARNING, "确定按钮坐标未记录，使用元素定位兜底")
-            return False
-
-        select_activity = self._select_activity
-        deadline = time.time() + timeout_sec
-        hits = 0
-
-        self._log(LogLevel.STEP, f"开始极速点击确定 ({x},{y})")
-
-        while time.time() < deadline:
-            self._ensure_not_stopped()
-
-            # 盲点坐标
-            self._fire_tap(x, y, duration=5)
-            hits += 1
-
-            # 即时检查是否跳转（activity 变了 = 成功离开选票页）
-            try:
-                curr = driver.current_activity
-                if select_activity and curr != select_activity:
-                    self._log(LogLevel.SUCCESS,
-                              f"确定成功！共点击 {hits} 次，已跳转到 {curr}")
-                    return True
-            except Exception:
-                # activity 读取异常，大概率是页面正在跳转
-                self._log(LogLevel.SUCCESS,
-                          f"确定成功！（页面跳转中，点击 {hits} 次）")
-                return True
-
-            # 每 200 次做一次元素定位校验（约 4-10 秒一次）
-            if hits % 200 == 0:
-                try:
-                    elem = driver.find_element(By.ID, "cn.damai:id/btn_buy_view")
-                    if elem.is_displayed():
-                        rect = elem.rect
-                        x = rect["x"] + rect["width"] // 2
-                        y = rect["y"] + rect["height"] // 2
-                        self._log(LogLevel.INFO,
-                                  f"坐标校正: ({x},{y}) [点击{hits}次]")
-                except Exception:
-                    # 找不到按钮 = 已跳转
-                    self._log(LogLevel.SUCCESS,
-                              f"确定成功！（按钮消失，点击 {hits} 次）")
-                    return True
-
-        self._log(LogLevel.WARNING, f"确定超时，共点击 {hits} 次")
-        return False
-
-    def _sprint_phase_submit(self, timeout_sec: float = 30) -> bool:
-        """
-        在订单页极速点击"提交订单"按钮，直到进入付款页。
-
-        策略同 _sprint_phase_confirm：盲点坐标优先，activity 检测跳转。
-        如果 submit 坐标未记录，用 confirm 坐标下移估算（底部栏近似位置）。
-        """
-        driver = self._ensure_driver()
-        x, y = self._submit_btn_x, self._submit_btn_y
-
-        # 如果提交坐标未记录，用确定坐标作为近似（底部栏区域）
-        if x is None or y is None:
-            if self._confirm_btn_x is not None and self._confirm_btn_y is not None:
-                x, y = self._confirm_btn_x, self._confirm_btn_y
-                self._log(LogLevel.INFO, "提交坐标未记录，使用确定坐标作为近似")
-            else:
-                self._log(LogLevel.WARNING, "无可用坐标，回退元素查找")
-                return False
-
-        order_activity = self._order_activity
-        select_activity = self._select_activity
-        deadline = time.time() + timeout_sec
-        hits = 0
-
-        self._log(LogLevel.STEP, f"开始极速点击提交 ({x},{y})")
-
-        while time.time() < deadline:
-            self._ensure_not_stopped()
-
-            # 盲点坐标
-            self._fire_tap(x, y, duration=5)
-            hits += 1
-
-            # 即时检查是否跳转到付款页（activity 不再是订单页或选票页）
-            try:
-                curr = driver.current_activity
-                if order_activity and curr != order_activity:
-                    if select_activity and curr == select_activity:
-                        # 退回了选票页！可能是提交被拒
-                        self._log(LogLevel.WARNING, "退回了选票页，提交可能失败")
-                        return False
-                    self._log(LogLevel.SUCCESS,
-                              f"提交成功！共点击 {hits} 次，已到 {curr}")
-                    return True
-            except Exception:
-                self._log(LogLevel.SUCCESS,
-                          f"提交成功！（页面跳转中，点击 {hits} 次）")
-                return True
-
-            # 每 200 次做一次元素定位校验
-            if hits % 200 == 0:
-                try:
-                    elem = driver.find_element(
-                        AppiumBy.ANDROID_UIAUTOMATOR,
-                        'new UiSelector().text("立即提交")'
-                    )
-                    if elem.is_displayed():
-                        rect = elem.rect
-                        x = rect["x"] + rect["width"] // 2
-                        y = rect["y"] + rect["height"] // 2
-                except Exception:
-                    pass  # 找不到也不一定是失败，继续盲点
-
-        self._log(LogLevel.WARNING, f"提交超时，共点击 {hits} 次")
-        return False
-
-    def _record_confirm_button(self) -> None:
-        """记录选票页"确定"按钮的屏幕中心坐标。"""
         try:
-            elem = self._driver.find_element(By.ID, "cn.damai:id/btn_buy_view")
+            elem = self._driver.find_element(
+                By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
+            )
             rect = elem.rect
-            self._confirm_btn_x = rect["x"] + rect["width"] // 2
-            self._confirm_btn_y = rect["y"] + rect["height"] // 2
+            right = rect["x"] + rect["width"]
+            cy = rect["y"] + rect["height"] // 2
+            offset = self.config.confirm_offset
+            self._btn_right_x = right
+            self._btn_y = cy
             self._log(LogLevel.INFO,
-                      f"已记录确定按钮坐标: ({self._confirm_btn_x},{self._confirm_btn_y})")
+                      f"底部栏: 右边缘={right}, Y={cy}, 偏移={offset}, 盲点坐标=({right - offset},{cy})")
         except Exception as e:
-            self._log(LogLevel.WARNING, f"记录确定按钮坐标失败: {e}")
-
-    def _try_record_submit_button(self) -> None:
-        """
-        尝试点击"确定"进入订单页，记录"提交订单"坐标，然后返回选票页。
-
-        开抢前点"确定"可能被拦（提示"未到开抢时间"），失败也不影响主流程。
-        """
-        self._log(LogLevel.INFO, "尝试进入订单页记录提交按钮坐标...")
-
-        # 先盲点一次确定看看能不能进
-        if self._confirm_btn_x is not None and self._confirm_btn_y is not None:
-            try:
-                self._fire_tap(self._confirm_btn_x, self._confirm_btn_y, duration=5)
-                time.sleep(0.5)
-
-                # 检查是否进入了订单页
-                curr = self._driver.current_activity
-                if self._select_activity and curr != self._select_activity:
-                    # 进入了新页面！记录提交按钮坐标
-                    self._order_activity = curr
-                    self._log(LogLevel.INFO, f"已进入订单页: {curr}")
-
-                    try:
-                        elem = self._driver.find_element(
-                            AppiumBy.ANDROID_UIAUTOMATOR,
-                            'new UiSelector().text("立即提交")'
-                        )
-                        rect = elem.rect
-                        self._submit_btn_x = rect["x"] + rect["width"] // 2
-                        self._submit_btn_y = rect["y"] + rect["height"] // 2
-                        self._log(LogLevel.INFO,
-                                  f"已记录提交按钮坐标: ({self._submit_btn_x},{self._submit_btn_y})")
-                    except Exception:
-                        # 找不到提交按钮文本，尝试用确定按钮坐标近似
-                        self._submit_btn_x = self._confirm_btn_x
-                        self._submit_btn_y = self._confirm_btn_y
-                        self._log(LogLevel.INFO, "提交坐标用确定坐标近似")
-
-                    # 返回选票页
-                    self._driver.press_keycode(4)
-                    time.sleep(0.5)
-                    self._log(LogLevel.INFO, "已返回选票页")
-                    return
-
-            except Exception as e:
-                self._log(LogLevel.WARNING, f"尝试进入订单页失败: {e}")
-
-        # 没进去（被拦了）——用确定按钮坐标作为提交坐标的近似
-        if self._confirm_btn_x is not None:
-            self._submit_btn_x = self._confirm_btn_x
-            self._submit_btn_y = self._confirm_btn_y
-            self._log(LogLevel.INFO, "未能进入订单页，提交坐标用确定坐标近似")
+            self._log(LogLevel.WARNING, f"记录底部栏坐标失败: {e}")
 
     def _wait_and_tap_purchase_button(self, timeout_sec: float = 120) -> bool:
         """
@@ -558,7 +465,6 @@ class DamaiAppTicketRunner:
                 )
                 if elem.is_displayed() and elem.is_enabled():
                     elem.click()
-                    time.sleep(0.5)  # 等选票页加载
                     return True
             except Exception:
                 pass
@@ -775,16 +681,14 @@ class DamaiAppTicketRunner:
     def _perform_ticket_flow(self, skip_preheat: bool = False) -> bool:
         try:
             self._ensure_not_stopped()
-            
+
             if not skip_preheat:
-                # 选择城市 (skipped if preheated)
                 if self.config.city:
                     self._transition_to(RunnerPhase.SELECTING_CITY)
                     self._log(LogLevel.STEP, f"选择城市: {self.config.city}")
                     if not self._select_city(self.config.city):
                         self._log(LogLevel.WARNING, f"未找到城市 {self.config.city}")
 
-                # 搜索目标 (skipped if preheated)
                 self._ensure_not_stopped()
                 if self.config.keyword:
                     self._transition_to(RunnerPhase.SEARCHING_EVENT)
@@ -792,11 +696,9 @@ class DamaiAppTicketRunner:
                     if not self._search_event(self.config.keyword):
                         raise TicketRunnerError("未能完成演出搜索")
             else:
-                # 预热情况下，已经在详情页面，跳过搜索步骤
                 self._ensure_not_stopped()
                 self._log(LogLevel.STEP, "使用预热详情页面，跳过搜索步骤")
 
-            # 如果需要选择观演人
             self._ensure_not_stopped()
             self._transition_to(RunnerPhase.TAPPING_PURCHASE)
             self._select_theme_dialog()
@@ -807,56 +709,69 @@ class DamaiAppTicketRunner:
             if not self._tap_purchase_button():
                 raise TicketRunnerError("未能找到预约/购买入口")
 
-            self._ensure_not_stopped()
-            self._transition_to(RunnerPhase.SELECTING_DATE)
-            self._log(LogLevel.STEP, "选择日期")
-            if not self._select_date():
-                self._log(LogLevel.STEP, "不需要选择日期")
+            # --- 一条分支：根据预约状态走两条独立的路 ---
+            if self.config.is_reserved:
+                return self._do_ticket_flow_reserved()
+            return self._do_ticket_flow_normal()
 
-            self._ensure_not_stopped()
-            self._transition_to(RunnerPhase.SELECTING_SESSION)
-            self._log(LogLevel.STEP, "选择场次")
-            if not self._select_session():
-                raise TicketRunnerError("未能选择场次")
-
-            self._ensure_not_stopped()
-            self._transition_to(RunnerPhase.SELECTING_PRICE)
-            self._log(LogLevel.STEP, "选择票价")
-            if not self._select_price():
-                raise TicketRunnerError("未能选择票价")
-
-
-            self._ensure_not_stopped()
-            # 无论是否有用户配置，都执行数量选择
-            self._transition_to(RunnerPhase.SELECTING_QUANTITY)
-            self._log(LogLevel.STEP, "选择数量")
-            self._select_quantity()
-            
-
-            # 去预约/购买
-            self._ensure_not_stopped()
-            self._transition_to(RunnerPhase.CONFIRMING_PURCHASE)
-            self._log(LogLevel.STEP, "确认购买")
-            (success, text) = self._confirm_purchase()
-            
-
-            self._ensure_not_stopped()
-            self._transition_to(RunnerPhase.SUBMITTING_ORDER)
-            self._log(LogLevel.STEP, "提交订单")
-            self._submit_order()
-
-            self._transition_to(RunnerPhase.COMPLETED)
-            return True
         except TicketRunnerStopped:
             self._mark_stopped()
             raise
         except TicketRunnerError:
             self._mark_failure()
-            raise
-        except Exception as exc:  # noqa: BLE001
-            self._mark_failure()
-            phase = self.current_phase.value if isinstance(self.current_phase, RunnerPhase) else str(self.current_phase)
-            raise TicketRunnerError(f"执行阶段 {phase} 出现异常: {exc}") from exc
+
+    def _do_ticket_flow_reserved(self) -> bool:
+        """已预约：跳过日期/场次/票价/数量，直接确认+提交。"""
+        self._ensure_not_stopped()
+        self._transition_to(RunnerPhase.CONFIRMING_PURCHASE)
+        self._log(LogLevel.STEP, "确认购买")
+        self._confirm_purchase()
+
+        self._ensure_not_stopped()
+        self._transition_to(RunnerPhase.SUBMITTING_ORDER)
+        self._log(LogLevel.STEP, "提交订单")
+        self._submit_order()
+
+        self._transition_to(RunnerPhase.COMPLETED)
+        return True
+
+    def _do_ticket_flow_normal(self) -> bool:
+        """未预约：选择日期/场次/票价/数量，然后确认+提交。"""
+        self._ensure_not_stopped()
+        self._transition_to(RunnerPhase.SELECTING_DATE)
+        self._log(LogLevel.STEP, "选择日期")
+        if not self._select_date():
+            self._log(LogLevel.STEP, "不需要选择日期")
+
+        self._ensure_not_stopped()
+        self._transition_to(RunnerPhase.SELECTING_SESSION)
+        self._log(LogLevel.STEP, "选择场次")
+        if not self._select_session():
+            raise TicketRunnerError("未能选择场次")
+
+        self._ensure_not_stopped()
+        self._transition_to(RunnerPhase.SELECTING_PRICE)
+        self._log(LogLevel.STEP, "选择票价")
+        if not self._select_price():
+            raise TicketRunnerError("未能选择票价")
+
+        self._ensure_not_stopped()
+        self._transition_to(RunnerPhase.SELECTING_QUANTITY)
+        self._log(LogLevel.STEP, "选择数量")
+        self._select_quantity()
+
+        self._ensure_not_stopped()
+        self._transition_to(RunnerPhase.CONFIRMING_PURCHASE)
+        self._log(LogLevel.STEP, "确认购买")
+        self._confirm_purchase()
+
+        self._ensure_not_stopped()
+        self._transition_to(RunnerPhase.SUBMITTING_ORDER)
+        self._log(LogLevel.STEP, "提交订单")
+        self._submit_order()
+
+        self._transition_to(RunnerPhase.COMPLETED)
+        return True
 
     # ------------------------------------------------------------------
     # Appium interaction primitives
@@ -1314,9 +1229,12 @@ class DamaiAppTicketRunner:
         return True
 
     def _select_quantity(self) -> bool:
+        quantity = int(getattr(self.config, 'ticket_quantity', 1))
+        if quantity == 1:
+            return True
+
         driver = self._ensure_driver()
         try:
-            quantity = int(getattr(self.config, 'ticket_quantity', 1))
 
             # 找到显示当前数量的元素
             tv_num = WebDriverWait(driver, 1.0).until(
@@ -1340,15 +1258,11 @@ class DamaiAppTicketRunner:
             
             # 根据delta值决定点击加号还是减号
             if delta > 0:
-                # 需要增加数量，点击加号按钮
                 for _ in range(delta):
                     plus_button.click()
-                    time.sleep(0.3)  # 等待每次点击生效
             elif delta < 0:
-                # 需要减少数量，点击减号按钮
                 for _ in range(-delta):
                     minus_button.click()
-                    time.sleep(0.3)  # 等待每次点击生效
             # 如果delta == 0，不需要任何操作
             
             return True
@@ -1368,8 +1282,9 @@ class DamaiAppTicketRunner:
         driver = self._ensure_driver()
 
         # --- 方式 1：坐标盲点（如果有记录） ---
-        x, y = self._confirm_btn_x, self._confirm_btn_y
-        if x is not None and y is not None:
+        if self._btn_right_x is not None and self._btn_y is not None:
+            x = self._btn_right_x - self.config.confirm_offset
+            y = self._btn_y
             self._log(LogLevel.INFO, f"确认购买: 优先坐标盲点 ({x},{y})")
             deadline = time.time() + 30
             hits = 0
@@ -1441,8 +1356,9 @@ class DamaiAppTicketRunner:
         driver = self._ensure_driver()
 
         # --- 方式 1：坐标盲点（如果有记录） ---
-        x, y = self._submit_btn_x, self._submit_btn_y
-        if x is not None and y is not None:
+        if self._btn_right_x is not None and self._btn_y is not None:
+            x = self._btn_right_x - self.config.confirm_offset
+            y = self._btn_y
             self._log(LogLevel.INFO, f"提交订单: 优先坐标盲点 ({x},{y})")
             deadline = time.time() + 30
             hits = 0
@@ -1493,6 +1409,7 @@ class DamaiAppTicketRunner:
     # Utility helpers
     # ------------------------------------------------------------------
     def _cleanup_driver(self) -> None:
+        self._stop_adb_shell()
         if self._driver is not None:
             try:
                 self._driver.quit()

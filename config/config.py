@@ -254,6 +254,15 @@ class AppTicketConfigModel(BaseModel):
         ge=0,
         validation_alias=AliasChoices("warmup_sec", "warmupSec"),
     )
+    confirm_offset: int = Field(
+        default=188,
+        ge=0,
+        validation_alias=AliasChoices("confirm_offset", "confirmOffset"),
+    )
+    is_reserved: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("is_reserved", "isReserved"),
+    )
     devices: List[DeviceOverrideModel] = Field(default_factory=list)
 
     @field_validator("server_url", mode="before")
@@ -470,6 +479,8 @@ class AppTicketConfig:
     wait_timeout: float = 2.0
     retry_delay: float = 2.0
     warmup_sec: Optional[int] = 120
+    confirm_offset: int = 188
+    is_reserved: bool = False
 
     def __post_init__(self) -> None:
         self.server_url = _normalise_server_url(self.server_url)

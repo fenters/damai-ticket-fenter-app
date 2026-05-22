@@ -9,6 +9,7 @@
   "retry_delay": 2.0,                // 重试延迟（秒），建议 1-3
   "max_retries": 3,                  // 最大重试次数
   "warmup_sec": 180,                 // 预热等待（秒），开售前提前进入详情页
+  "confirm_offset": 188,             // 确认按钮右边缘偏移量（px），btn_buy_view 右边界向左偏移
   "target_url": "",                  // 目标演出链接（大麦网演出详情页 URL）
   "price": "",                       // 票价文本，用于匹配票价（如 "380元"）
 
@@ -20,6 +21,7 @@
   "price_index": 1,                 // 票价索引（从 0 开始，优于 price 文本匹配）
   "ticket_quantity": 2,             // 购票张数
   "if_commit_order": true,          // true=自动提交订单，false=仅下单不提交
+  "is_reserved": true,              // true=已在大麦预约，跳过场次/票价/观演人选择
   "schedule_time": "",              // 定时抢票时间，格式 "YYYY-MM-DD HH:MM:SS"
   "users": []                       // 观演人列表，留空默认选择全部，建议留空，在app内提前选择好人员
 }

@@ -32,7 +32,7 @@ try:
     from damai_appium import (
         AppTicketConfig, ConfigValidationError,
         DamaiAppTicketRunner, FailureReason, LogLevel,
-        TicketRunReport,
+        TicketRunReport, TicketRunnerStopped,
     )
     from config import parse_adb_devices
     APPIUM_AVAILABLE = True
@@ -42,6 +42,7 @@ except Exception:
     LogLevel = None
     FailureReason = None
     TicketRunReport = None
+    TicketRunnerStopped = None
     parse_adb_devices = None
     APPIUM_AVAILABLE = False
 
@@ -94,7 +95,7 @@ class LogManager:
     def add(self, message: str, level: str = "info") -> None:
         icon = {"success": "  ", "warning": "  ", "error": "  ", "info": "  "}.get(level, "  ")
         tag = {"success": "success", "warning": "warning", "error": "error", "info": "info"}.get(level, "info")
-        ts = datetime.now().strftime("%H:%M:%S")
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:12]
         formatted = f"[{ts}] {icon} {message}"
         with self._lock:
             self._entries.append((ts, message, level))
@@ -187,19 +188,23 @@ class DamaiGUI:
         self._app_runner_thread: Optional[threading.Thread] = None
         self._sprint_target_epoch: Optional[float] = None
         self._preheat_executed = False
+        self._preheat_ready = threading.Event()
         self._schedule_running = False
         self._schedule_timer_id: Optional[str] = None
         self._config_payload: Dict[str, Any] = {}
         self._last_app_report: Optional[Any] = None
         self._detected_devices: List[str] = []
         self._web_config: Dict[str, Any] = {}
+        self._appium_process: Optional[subprocess.Popen] = None
         self._config_path = Path(__file__).resolve().parent / "config" / "config.json"
 
         self._app_retries = 3
         self._warmup_sec = 120
+        self._confirm_offset = 188
         self._wait_timeout = 2.0
         self._retry_delay = 2.0
         self._if_commit_order = True
+        self._is_reserved = False
 
         self._build_ui()
         self._bind_events()
@@ -334,13 +339,12 @@ class DamaiGUI:
             self._build_app_config()
         else:
             self._build_web_config()
+        self._left_panel.after(50, self._fix_left_panel_scroll)
 
     def _fix_left_panel_scroll(self) -> None:
         try:
             canvas = self._left_panel._parent_canvas
-            canvas.configure(yscrollincrement=4)
-            canvas.bind("<MouseWheel>",
-                        lambda e: canvas.yview_scroll(int(-e.delta / 3), "units"), add="+")
+            canvas.configure(yscrollincrement=40)
         except Exception:
             pass
 
@@ -449,6 +453,15 @@ class DamaiGUI:
         self._env_status = ctk.CTkLabel(env_frame, text="等待检测", text_color="#94A3B8", anchor="w")
         self._env_status.pack(side="left", padx=(12, 0))
 
+        self._appium_row = ctk.CTkFrame(card, fg_color="transparent")
+        self._appium_stop_btn = ctk.CTkButton(
+            self._appium_row, text="\u23F9 停止 Appium 服务", height=34,
+            fg_color="#DC2626", hover_color="#B91C1C",
+            text_color="white", command=self._stop_appium,
+        )
+        self._appium_stop_btn.pack(side="left")
+        self._update_appium_ui(False)
+
     def _build_params_card(self) -> None:
         card2 = ctk.CTkFrame(self._left_panel, corner_radius=12)
         card2.pack(fill="x", pady=(0, 3))
@@ -493,6 +506,24 @@ class DamaiGUI:
         self._commit_switch = ctk.CTkSwitch(opt_frame, text="自动提交订单", onvalue=True, offvalue=False)
         self._commit_switch.pack(side="left")
         self._commit_switch.select()
+        self._reserved_switch = ctk.CTkSwitch(opt_frame, text="已预约（纯盲点模式）", onvalue=True, offvalue=False)
+        self._reserved_switch.pack(side="left", padx=(10, 0))
+
+        tip_frame = ctk.CTkFrame(pf, fg_color="transparent")
+        tip_frame.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        icon_lbl = ctk.CTkLabel(tip_frame, text="\u26A0", text_color="#F59E0B",
+                                font=("Microsoft YaHei", 13))
+        icon_lbl.pack(side="left")
+        msg_lbl = ctk.CTkLabel(tip_frame,
+                               text="已预约：大麦自动选场次/票价/数量，冲刺纯盲点",
+                               text_color="#F59E0B", font=("Microsoft YaHei", 13),
+                               anchor="w")
+        msg_lbl.pack(side="left", padx=(4, 0))
+        def _wrap_tip(event=None):
+            w = tip_frame.winfo_width() - icon_lbl.winfo_width() - 12
+            if w > 50:
+                msg_lbl.configure(wraplength=w)
+        tip_frame.bind("<Configure>", _wrap_tip)
 
         def _toggle_params():
             params_collapsed[0] = not params_collapsed[0]
@@ -506,7 +537,7 @@ class DamaiGUI:
 
     def _build_schedule_card(self) -> None:
         card3 = ctk.CTkFrame(self._left_panel, corner_radius=12)
-        card3.pack(fill="x", pady=(0, 3))
+        card3.pack(fill="x", pady=(0, 0))
         hdr = ctk.CTkFrame(card3, fg_color="transparent")
         hdr.pack(fill="x", padx=16, pady=(14, 4))
         title_lbl = ctk.CTkLabel(hdr, text="\u23F0 定时抢票", font=("Microsoft YaHei", 14, "bold"), anchor="w")
@@ -539,6 +570,9 @@ class DamaiGUI:
 
         self._schedule_status = ctk.CTkLabel(tf, text="", text_color="#94A3B8", anchor="w")
         self._schedule_status.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        ctk.CTkLabel(tf, text="\uD83D\uDCA1 启动前请回到主页面，确保流程更流畅", font=("Microsoft YaHei", 11),
+                     text_color="#94A3B8", anchor="w").grid(row=4, column=0, columnspan=2, sticky="w")
 
         def _toggle_sched():
             sched_collapsed[0] = not sched_collapsed[0]
@@ -581,6 +615,11 @@ class DamaiGUI:
         self._retries_entry = ctk.CTkEntry(af, height=32, width=80)
         self._retries_entry.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=3)
         self._retries_entry.insert(0, "3")
+
+        ctk.CTkLabel(af, text="确认X左偏移(px)", font=("Microsoft YaHei", 12)).grid(row=3, column=0, sticky="w", pady=3)
+        self._confirm_offset_entry = ctk.CTkEntry(af, height=32, width=80)
+        self._confirm_offset_entry.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=3)
+        self._confirm_offset_entry.insert(0, "188")
 
         def _toggle_adv():
             adv_collapsed[0] = not adv_collapsed[0]
@@ -727,6 +766,16 @@ class DamaiGUI:
             except Exception:
                 pass
 
+        reserved = _safe_get(data, "is_reserved")
+        if reserved is not None:
+            try:
+                if reserved:
+                    self._reserved_switch.select()
+                else:
+                    self._reserved_switch.deselect()
+            except Exception:
+                pass
+
         wt = _safe_get(data, "wait_timeout")
         if wt is not None:
             _set_entry(self._wait_timeout_entry, wt)
@@ -744,6 +793,9 @@ class DamaiGUI:
         wp = _safe_get(data, "warmup_sec")
         if wp is not None:
             _set_entry(self._warmup_spin, wp)
+        co = _safe_get(data, "confirm_offset")
+        if co is not None:
+            _set_entry(self._confirm_offset_entry, co)
 
     def _collect_dict(self) -> dict:
         d: dict = {}
@@ -805,6 +857,11 @@ class DamaiGUI:
         except Exception:
             pass
 
+        try:
+            d["is_reserved"] = bool(self._reserved_switch.get())
+        except Exception:
+            pass
+
         wt = _wget(self._wait_timeout_entry)
         if wt:
             try:
@@ -831,6 +888,12 @@ class DamaiGUI:
         if wp:
             try:
                 d["warmup_sec"] = int(wp)
+            except ValueError:
+                pass
+        co = _wget(self._confirm_offset_entry)
+        if co:
+            try:
+                d["confirm_offset"] = int(co)
             except ValueError:
                 pass
         d["users"] = []
@@ -903,6 +966,7 @@ class DamaiGUI:
                 self._driver.quit()
             except Exception:
                 pass
+        self._stop_appium()
         self.root.destroy()
 
     # ============================
@@ -982,6 +1046,7 @@ class DamaiGUI:
             self.log("环境检测通过", "success")
         except Exception as e:
             self._update_status("env", "\u2717 失败", "#EF4444")
+            self._update_status("device", "未连接", "#EF4444")
             self._env_status.configure(text=f"\u2717 {e}", text_color="#EF4444")
             self.log(f"环境检测失败: {e}", "error")
         finally:
@@ -989,6 +1054,28 @@ class DamaiGUI:
                 self._env_btn.configure(state="normal", text="\uD83D\uDD0D 检测环境")
             except Exception:
                 pass
+
+    def _check_adb_devices(self, timeout: float = 3.0) -> List[str]:
+        """同步检测 ADB 设备，返回就绪的设备序列号列表。"""
+        try:
+            proc = subprocess.run(
+                ["adb", "devices", "-l"],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError("adb 命令执行失败")
+            devices = []
+            for line in proc.stdout.strip().splitlines()[1:]:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].lower() == "device":
+                    devices.append(parts[0])
+            if not devices:
+                raise RuntimeError("未检测到 ADB 设备，请连接手机")
+            return devices
+        except FileNotFoundError:
+            raise RuntimeError("未找到 adb，请安装 Android SDK platform-tools")
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("adb devices 超时")
 
     def _check_app_env(self) -> None:
         import urllib.request
@@ -998,14 +1085,125 @@ class DamaiGUI:
             raise RuntimeError("Appium 依赖未安装: pip install Appium-Python-Client")
 
         url_val = self._server_url.get().strip() or "http://127.0.0.1:4723"
-        status_url = url_val.rstrip("/") + "/status"
-        try:
-            with urllib.request.urlopen(status_url, timeout=5) as resp:
-                if resp.status != 200:
-                    raise RuntimeError(f"Appium 返回 {resp.status}")
+        if self._ensure_appium_running(url_val):
             self.log(f"Appium {url_val} 响应正常", "success")
-        except URLError as e:
-            raise RuntimeError(f"无法连接 Appium: {e.reason}") from e
+
+        devices = self._check_adb_devices()
+        self.log(f"ADB 设备: {devices[0]}", "success")
+
+    def _ensure_appium_running(self, url_val: str) -> bool:
+        import urllib.request
+        from urllib.error import URLError
+
+        status_url = url_val.rstrip("/") + "/status"
+        # 先检查是否已经在运行
+        try:
+            with urllib.request.urlopen(status_url, timeout=3) as resp:
+                return resp.status == 200
+        except URLError:
+            pass
+
+        # 不在运行，尝试自动启动
+        self.log("Appium 未运行，尝试自动启动...", "info")
+        appium_exe = self._find_appium()
+        if not appium_exe:
+            raise RuntimeError("未检测到 Appium 服务，请先安装 Appium（npm install -g appium）")
+
+        try:
+            flags = subprocess.CREATE_NEW_CONSOLE if hasattr(subprocess, "CREATE_NEW_CONSOLE") else 0
+            is_script = not appium_exe.lower().endswith(".exe")
+            if is_script:
+                proc = subprocess.Popen(["cmd.exe", "/c", appium_exe], creationflags=flags)
+            else:
+                proc = subprocess.Popen([appium_exe], creationflags=flags)
+            self._appium_process = proc
+            self._update_appium_ui(True)
+        except Exception as e:
+            self._update_appium_ui(False)
+            raise RuntimeError(f"启动 Appium 失败: {e}") from e
+
+        # 等待就绪（最多 15 秒）
+        for _ in range(30):
+            import time
+            time.sleep(0.5)
+            try:
+                with urllib.request.urlopen(status_url, timeout=2) as resp:
+                    if resp.status == 200:
+                        self.log("Appium 已自动启动", "success")
+                        return True
+            except URLError:
+                continue
+
+        # 超时
+        try:
+            self._appium_process.terminate()
+        except Exception:
+            pass
+        self._appium_process = None
+        self._update_appium_ui(False)
+        raise RuntimeError("Appium 启动超时，请手动启动")
+
+    def _find_appium(self) -> Optional[str]:
+        """在 PATH 和常见位置查找 appium 可执行文件"""
+        candidates = ["appium", "appium.cmd"]
+        # 检查 PATH
+        for path_dir in os.environ.get("PATH", "").split(os.pathsep):
+            for name in candidates:
+                full = os.path.join(path_dir, name)
+                if os.path.isfile(full):
+                    return full
+        # 常见 npm 全局安装位置
+        for base in [
+            os.environ.get("APPDATA", ""),
+            os.environ.get("LOCALAPPDATA", ""),
+        ]:
+            for sub in [r"npm\appium", r"npm\appium.cmd"]:
+                full = os.path.join(base, sub)
+                if os.path.isfile(full):
+                    return full
+        return None
+
+    def _update_appium_ui(self, running: bool) -> None:
+        if running:
+            self._appium_stop_btn.configure(state="normal")
+            self._appium_row.pack(fill="x", padx=16, pady=(0, 14))
+            self._poll_appium_process()
+        else:
+            self._appium_row.pack_forget()
+
+    def _poll_appium_process(self) -> None:
+        if not self._appium_process:
+            return
+        try:
+            ret = self._appium_process.poll()
+            if ret is not None:
+                self._appium_process = None
+                self._update_appium_ui(False)
+                self._env_status.configure(text="等待检测", text_color="#94A3B8")
+                self._update_status("env", "待检测", "#94A3B8")
+                self._update_status("device", "未连接", "#EF4444")
+                self.log("Appium 服务已关闭", "warning")
+                return
+        except Exception:
+            pass
+        self.root.after(2000, self._poll_appium_process)
+
+    def _stop_appium(self) -> None:
+        pid = self._appium_process.pid if self._appium_process else None
+        self._appium_process = None
+        if pid:
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True, timeout=5,
+                )
+                self.log("Appium 服务已停止", "info")
+            except Exception as e:
+                self.log(f"停止 Appium 失败: {e}", "error")
+        self._update_appium_ui(False)
+        self._env_status.configure(text="等待检测", text_color="#94A3B8")
+        self._update_status("env", "待检测", "#94A3B8")
+        self._update_status("device", "未连接", "#EF4444")
 
     def _check_web_env(self) -> None:
         if not SELENIUM_AVAILABLE:
@@ -1090,10 +1288,15 @@ class DamaiGUI:
         except ValueError:
             self._app_retries = 3
         self._if_commit_order = bool(self._commit_switch.get())
+        self._is_reserved = bool(self._reserved_switch.get())
         try:
             self._warmup_sec = int(self._warmup_spin.get().strip() or 120)
         except ValueError:
             self._warmup_sec = 120
+        try:
+            self._confirm_offset = int(self._confirm_offset_entry.get().strip() or 188)
+        except ValueError:
+            self._confirm_offset = 188
 
         if AppTicketConfig is None:
             return None
@@ -1107,10 +1310,12 @@ class DamaiGUI:
             "price_index": price_index,
             "ticket_quantity": ticket_quantity,
             "if_commit_order": self._if_commit_order,
+            "is_reserved": self._is_reserved,
             "device_caps": device_caps,
             "wait_timeout": wait_timeout,
             "retry_delay": retry_delay,
             "warmup_sec": self._warmup_sec,
+            "confirm_offset": self._confirm_offset,
             "users": [],
         }
         self._config_payload = payload
@@ -1141,6 +1346,7 @@ class DamaiGUI:
         self._sprint_target_epoch = target.timestamp()
         self._schedule_running = True
         self._preheat_executed = False
+        self._preheat_ready.clear()
         self._schedule_btn.configure(state="disabled")
 
         cfg = self._collect_config()
@@ -1151,6 +1357,7 @@ class DamaiGUI:
     def _cancel_schedule(self) -> None:
         self._schedule_running = False
         self._preheat_executed = False
+        self._preheat_ready.clear()
         self._sprint_target_epoch = None
         if self._schedule_timer_id:
             try:
@@ -1170,7 +1377,6 @@ class DamaiGUI:
         remaining = self._sprint_target_epoch - now
         if remaining <= 0:
             self._schedule_running = False
-            self._schedule_btn.configure(state="normal")
             self._schedule_status.configure(text="\u23F0 到点，开始抢票!")
             self.log("到点! 开始抢票", "success")
             self._start_sprint()
@@ -1186,13 +1392,19 @@ class DamaiGUI:
             self.log(f"进入预热阶段 ({warmup}s)", "info")
             self._do_preheat()
 
-        self._schedule_timer_id = self.root.after(200, self._schedule_tick)
+        interval = 5 if remaining < 1.0 else 200
+        self._schedule_timer_id = self.root.after(interval, self._schedule_tick)
 
     def _do_preheat(self) -> None:
         threading.Thread(target=self._preheat_worker, daemon=True).start()
 
     def _preheat_worker(self) -> None:
         try:
+            self.log("预热前检查环境...", "info")
+            self._check_app_env()
+            self._update_status("env", "\u2713 就绪", "#22C55E")
+            self._env_status.configure(text="\u2713 环境正常", text_color="#22C55E")
+
             config = self._collect_config()
             if config is None:
                 self.log("预热: 配置无效", "error")
@@ -1203,14 +1415,14 @@ class DamaiGUI:
                 stop_signal=lambda: self._should_stop,
             )
             self._app_runner.preheat()
-            self.log("预热完成! 已进入选票页", "success")
+            self._preheat_ready.set()
             self._update_status("status", "预热就绪", "#22C55E")
         except Exception as e:
             self.log(f"预热失败: {e}", "error")
-            self._app_runner = None
+            self._update_status("status", "预热失败", "#EF4444")
 
     def _start_sprint(self) -> None:
-        if self._app_runner is None:
+        if self._app_runner is None or not self._preheat_ready.is_set():
             self.log("没有预热好的 runner，使用普通模式", "warning")
             self._start_normal()
             return
@@ -1225,6 +1437,8 @@ class DamaiGUI:
         self._update_status("status", "冲刺中...", "#3B82F6")
         self._start_btn.configure(state="disabled")
         self._stop_btn.configure(state="normal")
+        self._schedule_btn.configure(state="disabled")
+        self._schedule_cancel_btn.configure(state="disabled")
         self.log("启动极速冲刺模式", "info")
 
         def run():
@@ -1236,6 +1450,8 @@ class DamaiGUI:
                 else:
                     self.log("抢票未成功，尝试传统模式", "warning")
                     self._app_runner.run(max_retries=self._app_retries)
+            except TicketRunnerStopped:
+                self.log("用户已停止冲刺", "warning")
             except Exception as e:
                 self.log(f"冲刺异常: {e}", "error")
                 self._update_status("status", "异常", "#EF4444")
@@ -1243,6 +1459,8 @@ class DamaiGUI:
                 self._is_grabbing = False
                 self._start_btn.configure(state="normal")
                 self._stop_btn.configure(state="disabled")
+                self._schedule_btn.configure(state="normal")
+                self._schedule_cancel_btn.configure(state="normal")
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -1272,6 +1490,8 @@ class DamaiGUI:
         self._update_status("status", "抢票中...", "#3B82F6")
         self._start_btn.configure(state="disabled")
         self._stop_btn.configure(state="normal")
+        self._schedule_btn.configure(state="disabled")
+        self._schedule_cancel_btn.configure(state="disabled")
 
         def run():
             try:
@@ -1289,12 +1509,16 @@ class DamaiGUI:
                 else:
                     self.log("抢票未成功", "warning")
                     self._update_status("status", "未成功", "#F59E0B")
+            except TicketRunnerStopped:
+                self.log("用户已停止抢票", "warning")
             except Exception as e:
                 self.log(f"抢票异常: {e}", "error")
                 self._update_status("status", "异常", "#EF4444")
             finally:
                 self._is_grabbing = False
                 self._start_btn.configure(state="normal")
+                self._schedule_btn.configure(state="normal")
+                self._schedule_cancel_btn.configure(state="normal")
                 self._stop_btn.configure(state="disabled")
 
         threading.Thread(target=run, daemon=True).start()
@@ -1342,8 +1566,11 @@ class DamaiGUI:
                 self.log("Web 抢票流程完成", "success")
                 self._update_status("status", "已完成", "#22C55E")
             except Exception as e:
-                self.log(f"Web 抢票异常: {e}", "error")
-                self._update_status("status", "异常", "#EF4444")
+                if self._should_stop:
+                    self.log("用户已停止 Web 抢票", "warning")
+                else:
+                    self.log(f"Web 抢票异常: {e}", "error")
+                    self._update_status("status", "异常", "#EF4444")
             finally:
                 self._is_grabbing = False
                 self._start_btn.configure(state="normal")
@@ -1358,6 +1585,8 @@ class DamaiGUI:
         self._update_status("status", "已停止", "#F59E0B")
         self._start_btn.configure(state="normal")
         self._stop_btn.configure(state="disabled")
+        self._schedule_btn.configure(state="normal")
+        self._schedule_cancel_btn.configure(state="normal")
 
     # ============================
     # RUN

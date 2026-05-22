@@ -27,11 +27,12 @@ from damai_appium import (
 def _console_logger(level: str, message: str, context: Optional[Dict[str, object]] = None) -> None:
     if context is None:
         context = {}
+    ts = datetime.now().strftime("%H:%M:%S.%f")[:12]
     ctx_repr = " ".join(f"{k}={v}" for k, v in context.items())
     if ctx_repr:
-        print(f"[{level.upper()}] {message} | {ctx_repr}")
+        print(f"[{ts}] [{level.upper()}] {message} | {ctx_repr}")
     else:
-        print(f"[{level.upper()}] {message}")
+        print(f"[{ts}] [{level.upper()}] {message}")
 
 
 def _make_session_logger(session_label: str):
